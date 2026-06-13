@@ -39,9 +39,9 @@ Edit the network values near the top of `src/main.cpp`:
 
 ```cpp
 byte mac[] = {0xDE, 0xAD, 0xBE, 0xEF, 0x32, 0x01};
-IPAddress ip(192, 168, 0, 50);
-IPAddress dnsServer(192, 168, 0, 1);
-IPAddress gateway(192, 168, 0, 1);
+IPAddress ip(192, 168, 1, 105);
+IPAddress dnsServer(192, 168, 1, 1);
+IPAddress gateway(192, 168, 1, 1);
 IPAddress subnet(255, 255, 255, 0);
 ```
 
@@ -64,7 +64,7 @@ connected, set `upload_port` and `monitor_port` in `platformio.ini`.
 
 ## Use
 
-Open `http://192.168.0.50/` from the same local network. Available endpoints:
+Open `http://192.168.1.105/` from the same local network. Available endpoints:
 
 - `/` - control page and commanded status
 - `/on` - command power on

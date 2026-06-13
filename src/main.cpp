@@ -21,9 +21,9 @@ const uint8_t SETTINGS_VERSION = 1;
 
 // Edit these values to match the local network.
 byte mac[] = {0xDE, 0xAD, 0xBE, 0xEF, 0x32, 0x01};
-IPAddress ip(192, 168, 0, 50);
-IPAddress dnsServer(192, 168, 0, 1);
-IPAddress gateway(192, 168, 0, 1);
+IPAddress ip(192, 168, 1, 105);
+IPAddress dnsServer(192, 168, 1, 1);
+IPAddress gateway(192, 168, 1, 1);
 IPAddress subnet(255, 255, 255, 0);
 
 EthernetServer server(80);

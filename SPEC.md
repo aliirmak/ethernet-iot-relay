@@ -19,7 +19,7 @@ interface.
 - Provide web routes `/`, `/on`, `/off`, `/restart`, and `/status`.
 - Provide serial commands `help`, `status`, `on`, `off`, `restart`, and `ip`.
 - Report commanded state only; physical AC state is not sensed.
-- Use static IP `192.168.0.50` by default.
+- Use static IP `192.168.1.105` by default.
 
 ## Pin Allocation
 
