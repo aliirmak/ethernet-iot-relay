@@ -28,13 +28,7 @@ IPAddress subnet(255, 255, 255, 0);
 
 EthernetServer server(80);
 
-enum PowerState {
-  POWER_ON,
-  POWER_OFF,
-  RESTARTING,
-  RESTART_COMPLETE,
-  UNKNOWN
-};
+enum PowerState { POWER_ON, POWER_OFF, RESTARTING, RESTART_COMPLETE, UNKNOWN };
 
 PowerState powerState = UNKNOWN;
 unsigned long restartStartedAt = 0;
@@ -48,9 +42,9 @@ struct PersistentSettings {
 };
 
 uint8_t settingsChecksum(const PersistentSettings &settings) {
-  return static_cast<uint8_t>(
-      settings.magic ^ (settings.magic >> 8) ^ settings.version ^
-      settings.restartDelaySeconds ^ 0xA5);
+  return static_cast<uint8_t>(settings.magic ^ (settings.magic >> 8) ^
+                              settings.version ^ settings.restartDelaySeconds ^
+                              0xA5);
 }
 
 bool isValidRestartDelay(uint8_t seconds) {
@@ -307,15 +301,14 @@ void sendMainPage(EthernetClient &client, const char *message) {
   client.println("<p><a href=\"/status\">Plain-text status</a></p>");
   client.println("<p><small>Status is commanded state only; AC power is not "
                  "physically verified.</small></p>");
-  client.println(
-      "<script>"
-      "delayValue.textContent=seconds.value;"
-      "setInterval(function(){fetch('/status',{cache:'no-store'})"
-      ".then(function(r){return r.text()})"
-      ".then(function(t){var m=t.match(/^state=(.+)$/m);"
-      "if(m)powerState.textContent=m[1]})"
-      ".catch(function(){})},1000);"
-      "</script>");
+  client.println("<script>"
+                 "delayValue.textContent=seconds.value;"
+                 "setInterval(function(){fetch('/status',{cache:'no-store'})"
+                 ".then(function(r){return r.text()})"
+                 ".then(function(t){var m=t.match(/^state=(.+)$/m);"
+                 "if(m)powerState.textContent=m[1]})"
+                 ".catch(function(){})},1000);"
+                 "</script>");
   client.println("</body></html>");
 }
 
