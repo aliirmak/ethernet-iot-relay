@@ -12,6 +12,7 @@ const uint8_t ICMP_DATA_SIZE = 16;
 const uint8_t ICMP_PACKET_SIZE = ICMP_HEADER_SIZE + ICMP_DATA_SIZE;
 const uint8_t IPRAW_HEADER_SIZE = 6;
 const uint16_t ICMP_IDENTIFIER = 0x5532;
+const uint16_t ICMP_SOCKET_PORT = 0;
 
 uint16_t sequenceNumber = 0;
 
@@ -67,6 +68,18 @@ uint8_t findFreeSocket() {
   }
 
   return MAX_SOCK_NUM;
+}
+
+uint16_t readStableRegister(uint16_t (*readRegister)(SOCKET),
+                            uint8_t socketNumber) {
+  uint16_t previous = readRegister(socketNumber);
+  while (true) {
+    uint16_t current = readRegister(socketNumber);
+    if (current == previous) {
+      return current;
+    }
+    previous = current;
+  }
 }
 
 void closeSocket(uint8_t socketNumber) {
@@ -131,6 +144,7 @@ bool icmpPing(IPAddress target, unsigned long timeoutMs) {
   closeSocket(socketNumber);
   W5100.writeSnMR(socketNumber, SnMR::IPRAW);
   W5100.writeSnPROTO(socketNumber, IPPROTO::ICMP);
+  W5100.writeSnPORT(socketNumber, ICMP_SOCKET_PORT);
   W5100.writeSnTTL(socketNumber, 64);
   W5100.writeSnIR(socketNumber, 0xFF);
   W5100.execCmdSn(socketNumber, Sock_OPEN);
@@ -143,7 +157,13 @@ bool icmpPing(IPAddress target, unsigned long timeoutMs) {
 
   uint8_t targetBytes[4] = {target[0], target[1], target[2], target[3]};
   W5100.writeSnDIPR(socketNumber, targetBytes);
+  W5100.writeSnDPORT(socketNumber, 0);
 
+  if (readStableRegister(W5100.readSnTX_FSR, socketNumber) < sizeof(packet)) {
+    closeSocket(socketNumber);
+    SPI.endTransaction();
+    return false;
+  }
   uint16_t transmitPointer = W5100.readSnTX_WR(socketNumber);
   writeSocketBuffer(W5100.SBASE(socketNumber), transmitPointer, packet,
                     sizeof(packet));
@@ -162,11 +182,18 @@ bool icmpPing(IPAddress target, unsigned long timeoutMs) {
       SPI.endTransaction();
       return false;
     }
+    SPI.endTransaction();
+    delay(1);
+    SPI.beginTransaction(SPI_ETHERNET_SETTINGS);
   }
 
   while (millis() - startedAt < timeoutMs && !replyReceived) {
-    uint16_t available = W5100.readSnRX_RSR(socketNumber);
+    uint16_t available =
+        readStableRegister(W5100.readSnRX_RSR, socketNumber);
     if (available < IPRAW_HEADER_SIZE) {
+      SPI.endTransaction();
+      delay(1);
+      SPI.beginTransaction(SPI_ETHERNET_SETTINGS);
       continue;
     }
 

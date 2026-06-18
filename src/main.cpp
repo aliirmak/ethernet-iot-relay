@@ -57,7 +57,7 @@ unsigned long lastSuccessfulPingMs = 0;
 unsigned long bootGraceStartMs = 0;
 uint8_t restartDelaySeconds = DEFAULT_RESTART_DELAY_SECONDS;
 uint16_t pingIntervalSeconds = DEFAULT_PING_INTERVAL_SECONDS;
-uint8_t consecutiveFailedPings = 0;
+uint32_t consecutiveFailedPings = 0;
 bool pingCheckRequested = false;
 bool bootGraceActive = false;
 bool hasPingAttempt = false;
@@ -385,7 +385,7 @@ void updatePingMonitor() {
     return;
   }
 
-  if (consecutiveFailedPings < 255) {
+  if (consecutiveFailedPings < 0xFFFFFFFFUL) {
     ++consecutiveFailedPings;
   }
 
