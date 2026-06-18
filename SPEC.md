@@ -19,6 +19,13 @@ interface.
 - Provide web routes `/`, `/on`, `/off`, `/restart`, and `/status`.
 - Provide serial commands `help`, `status`, `on`, `off`, `restart`, and `ip`.
 - Report commanded state only; physical AC state is not sensed.
+- Monitor SLRT target `192.168.1.101` using ICMP echo only.
+- Report commanded power and target ping status as separate values.
+- Use a 90-second boot grace period after power-on and restart.
+- Require three consecutive post-grace ping failures before reporting
+  `PING_NOT_RESPONDING`.
+- Provide web route `/pingnow` and include ping fields in `/status`.
+- Provide serial commands `pingstatus` and `pingnow`.
 - Use static IP `192.168.1.105` by default.
 
 ## Pin Allocation
