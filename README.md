@@ -7,6 +7,11 @@ from a local web page or the USB serial monitor.
 The displayed state is the **commanded state**. This design has no AC voltage
 feedback and cannot verify that the computer is actually powered.
 
+The firmware separately monitors a Simulink Real-Time target at
+`192.168.1.101` using ICMP echo requests. A successful ping verifies network
+reachability only; it does not verify AC voltage, operating-system health, or
+the state of a Simulink application.
+
 ## Hardware
 
 - Digilent chipKIT Uno32 Rev C
@@ -43,6 +48,7 @@ IPAddress ip(192, 168, 1, 105);
 IPAddress dnsServer(192, 168, 1, 1);
 IPAddress gateway(192, 168, 1, 1);
 IPAddress subnet(255, 255, 255, 0);
+IPAddress slrtTargetIP(192, 168, 1, 101);
 ```
 
 Change `RELAY_SIGNAL_FOR_POWER_ON` and
@@ -70,14 +76,32 @@ Open `http://192.168.1.105/` from the same local network. Available endpoints:
 - `/on` - command power on
 - `/off` - command power off
 - `/restart` - turn power off for the saved delay, then restore it
+- `/pingnow` - request an ICMP ping check as soon as the HTTP request finishes
 - `/delay?seconds=3` - save a restart delay from 1 to 15 seconds
 - `/status` - machine-readable plain-text status
 
+Control and settings routes redirect back to `/` after performing their
+action. This keeps `/restart` out of the active browser location so waking or
+refreshing the dashboard does not repeat a restart.
+
 The web page includes a 1–15 second restart-delay slider. Its saved value is
 stored in the Uno32's EEPROM emulation and survives resets and power loss. The
-default is 3 seconds.
+default is 3 seconds. Releasing the slider saves the selected value
+automatically; the Save button remains available as a fallback.
 
-Serial commands are `help`, `status`, `on`, `off`, `restart`, and `ip`.
+Serial commands are `help`, `status`, `on`, `off`, `restart`, `ip`,
+`pingstatus`, and `pingnow`. Optional aliases `netstatus` and `checknow` are
+also accepted.
+
+After an `on` command or completed restart, the ping status remains
+`PING_BOOTING` for up to 90 seconds. A successful reply ends this grace period
+early. After grace expires, three consecutive failed checks are required
+before the status changes to `PING_NOT_RESPONDING`. Continuous checks are
+disabled by default and can be enabled from the dashboard. Their interval is
+configurable from 1 to 300 seconds and is stored with the checkbox state in
+EEPROM. Manual **Check Ping Now** requests work whether continuous checks are
+enabled or disabled. Each check uses a 1.5-second timeout.
+
 The restart timer is non-blocking; status and serial commands remain
 responsive. A second restart request during a restart is rejected.
 
@@ -91,6 +115,9 @@ multimeter to D7 and GND:
 3. Send `on`; D7 should read LOW.
 4. Send `restart`; D7 should remain HIGH for the saved delay and return LOW.
 5. Connect Ethernet and verify the control page and `/status`.
+6. With the target booted, run `pingnow` and confirm `PING_RESPONDING`.
+7. Disconnect the target network cable and confirm `PING_NOT_RESPONDING`
+   after boot grace and three failed checks.
 
 Test the Ethernet Shield before making any board modifications. Some Uno32
 Rev C and shield combinations may have an SPI/ICSP reset compatibility issue.
