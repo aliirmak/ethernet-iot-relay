@@ -15,6 +15,9 @@ const uint16_t ICMP_IDENTIFIER = 0x5532;
 const uint16_t ICMP_SOCKET_PORT = 0;
 
 uint16_t sequenceNumber = 0;
+uint8_t pingSocket = MAX_SOCK_NUM;
+
+void closeSocket(uint8_t socketNumber);
 
 uint16_t internetChecksum(const uint8_t *data, uint16_t length) {
   uint32_t sum = 0;
@@ -67,6 +70,15 @@ uint8_t findFreeSocket() {
     }
   }
 
+  for (uint8_t socketNumber = 0; socketNumber < socketCount; ++socketNumber) {
+    uint8_t status = W5100.readSnSR(socketNumber);
+    if (status == SnSR::LAST_ACK || status == SnSR::TIME_WAIT ||
+        status == SnSR::FIN_WAIT || status == SnSR::CLOSING) {
+      closeSocket(socketNumber);
+      return socketNumber;
+    }
+  }
+
   return MAX_SOCK_NUM;
 }
 
@@ -85,6 +97,46 @@ uint16_t readStableRegister(uint16_t (*readRegister)(SOCKET),
 void closeSocket(uint8_t socketNumber) {
   W5100.execCmdSn(socketNumber, Sock_CLOSE);
   W5100.writeSnIR(socketNumber, 0xFF);
+}
+
+IcmpPingResult ensurePingSocket() {
+  if (pingSocket < MAX_SOCK_NUM &&
+      W5100.readSnSR(pingSocket) == SnSR::IPRAW) {
+    return ICMP_PING_REPLY;
+  }
+
+  pingSocket = findFreeSocket();
+  if (pingSocket == MAX_SOCK_NUM) {
+    return ICMP_PING_NO_SOCKET;
+  }
+
+  closeSocket(pingSocket);
+  W5100.writeSnMR(pingSocket, SnMR::IPRAW);
+  W5100.writeSnPROTO(pingSocket, IPPROTO::ICMP);
+  W5100.writeSnPORT(pingSocket, ICMP_SOCKET_PORT);
+  W5100.writeSnTTL(pingSocket, 64);
+  W5100.writeSnIR(pingSocket, 0xFF);
+  W5100.execCmdSn(pingSocket, Sock_OPEN);
+
+  if (W5100.readSnSR(pingSocket) != SnSR::IPRAW) {
+    closeSocket(pingSocket);
+    pingSocket = MAX_SOCK_NUM;
+    return ICMP_PING_SOCKET_ERROR;
+  }
+
+  return ICMP_PING_REPLY;
+}
+
+void discardReceivedData(uint8_t socketNumber) {
+  uint16_t available =
+      readStableRegister(W5100.readSnRX_RSR, socketNumber);
+  if (available == 0) {
+    return;
+  }
+
+  uint16_t receivePointer = W5100.readSnRX_RD(socketNumber);
+  W5100.writeSnRX_RD(socketNumber, receivePointer + available);
+  W5100.execCmdSn(socketNumber, Sock_RECV);
 }
 
 bool matchesReply(const uint8_t *sourceIp, IPAddress target,
@@ -111,9 +163,9 @@ bool matchesReply(const uint8_t *sourceIp, IPAddress target,
 
 } // namespace
 
-bool icmpPing(IPAddress target, unsigned long timeoutMs) {
+IcmpPingResult icmpPing(IPAddress target, unsigned long timeoutMs) {
   if (W5100.getChip() == 0) {
-    return false;
+    return ICMP_PING_SOCKET_ERROR;
   }
 
   uint8_t packet[ICMP_PACKET_SIZE] = {
@@ -135,25 +187,13 @@ bool icmpPing(IPAddress target, unsigned long timeoutMs) {
   bool replyReceived = false;
 
   SPI.beginTransaction(SPI_ETHERNET_SETTINGS);
-  uint8_t socketNumber = findFreeSocket();
-  if (socketNumber == MAX_SOCK_NUM) {
+  IcmpPingResult socketResult = ensurePingSocket();
+  if (socketResult != ICMP_PING_REPLY) {
     SPI.endTransaction();
-    return false;
+    return socketResult;
   }
-
-  closeSocket(socketNumber);
-  W5100.writeSnMR(socketNumber, SnMR::IPRAW);
-  W5100.writeSnPROTO(socketNumber, IPPROTO::ICMP);
-  W5100.writeSnPORT(socketNumber, ICMP_SOCKET_PORT);
-  W5100.writeSnTTL(socketNumber, 64);
-  W5100.writeSnIR(socketNumber, 0xFF);
-  W5100.execCmdSn(socketNumber, Sock_OPEN);
-
-  if (W5100.readSnSR(socketNumber) != SnSR::IPRAW) {
-    closeSocket(socketNumber);
-    SPI.endTransaction();
-    return false;
-  }
+  uint8_t socketNumber = pingSocket;
+  discardReceivedData(socketNumber);
 
   uint8_t targetBytes[4] = {target[0], target[1], target[2], target[3]};
   W5100.writeSnDIPR(socketNumber, targetBytes);
@@ -161,8 +201,9 @@ bool icmpPing(IPAddress target, unsigned long timeoutMs) {
 
   if (readStableRegister(W5100.readSnTX_FSR, socketNumber) < sizeof(packet)) {
     closeSocket(socketNumber);
+    pingSocket = MAX_SOCK_NUM;
     SPI.endTransaction();
-    return false;
+    return ICMP_PING_SOCKET_ERROR;
   }
   uint16_t transmitPointer = W5100.readSnTX_WR(socketNumber);
   writeSocketBuffer(W5100.SBASE(socketNumber), transmitPointer, packet,
@@ -179,8 +220,9 @@ bool icmpPing(IPAddress target, unsigned long timeoutMs) {
     if (interruptFlags & SnIR::TIMEOUT) {
       W5100.writeSnIR(socketNumber, SnIR::TIMEOUT);
       closeSocket(socketNumber);
+      pingSocket = MAX_SOCK_NUM;
       SPI.endTransaction();
-      return false;
+      return ICMP_PING_NO_REPLY;
     }
     SPI.endTransaction();
     delay(1);
@@ -223,7 +265,6 @@ bool icmpPing(IPAddress target, unsigned long timeoutMs) {
                                  currentSequence);
   }
 
-  closeSocket(socketNumber);
   SPI.endTransaction();
-  return replyReceived;
+  return replyReceived ? ICMP_PING_REPLY : ICMP_PING_NO_REPLY;
 }

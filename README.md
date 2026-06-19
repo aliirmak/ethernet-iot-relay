@@ -104,6 +104,10 @@ configurable from 1 to 300 seconds and is stored with the checkbox state in
 EEPROM. Manual **Check Ping Now** requests work whether continuous checks are
 enabled or disabled. Each check uses a 1.5-second timeout.
 
+`PING_RETRYING` means a check received no reply but the three-failure
+threshold has not yet been reached. `PING_UNKNOWN` is reserved for startup or
+after changing the target address, before any check has completed.
+
 The dashboard also provides editable controller and SLRT target IPv4
 addresses. Both are stored in EEPROM. A new target address takes effect
 immediately. Saving a controller address redirects the browser to the new

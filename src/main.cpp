@@ -44,6 +44,7 @@ enum PingStatus {
   PING_UNKNOWN,
   PING_BOOTING,
   PING_CHECKING,
+  PING_RETRYING,
   PING_RESPONDING,
   PING_NOT_RESPONDING,
   PING_DISABLED
@@ -283,6 +284,8 @@ const char *pingStatusToString(PingStatus status) {
     return "PING_BOOTING";
   case PING_CHECKING:
     return "PING_CHECKING";
+  case PING_RETRYING:
+    return "PING_RETRYING";
   case PING_RESPONDING:
     return "PING_RESPONDING";
   case PING_NOT_RESPONDING:
@@ -410,7 +413,7 @@ void printEthernetDiagnostics() {
   }
 }
 
-bool pingSLRTTarget() {
+IcmpPingResult pingSLRTTarget() {
   return icmpPing(slrtTargetIP, PING_TIMEOUT_MS);
 }
 
@@ -461,13 +464,23 @@ void updatePingMonitor() {
   PingStatus previousStatus = slrtPingStatus;
   slrtPingStatus = PING_CHECKING;
 
-  bool responding = pingSLRTTarget();
-  if (responding) {
+  IcmpPingResult pingResult = pingSLRTTarget();
+  if (pingResult == ICMP_PING_REPLY) {
     lastSuccessfulPingMs = millis();
     consecutiveFailedPings = 0;
     bootGraceActive = false;
     slrtPingStatus = PING_RESPONDING;
     Serial.println("SLRT ping: responding.");
+    return;
+  }
+
+  if (pingResult == ICMP_PING_NO_SOCKET ||
+      pingResult == ICMP_PING_SOCKET_ERROR) {
+    slrtPingStatus = previousStatus == PING_CHECKING ? PING_RETRYING
+                                                     : previousStatus;
+    Serial.println(pingResult == ICMP_PING_NO_SOCKET
+                       ? "SLRT ping deferred: no W5100 socket available."
+                       : "SLRT ping failed: W5100 socket error.");
     return;
   }
 
@@ -488,7 +501,7 @@ void updatePingMonitor() {
   } else if (previousStatus == PING_RESPONDING) {
     slrtPingStatus = PING_RESPONDING;
   } else {
-    slrtPingStatus = PING_UNKNOWN;
+    slrtPingStatus = PING_RETRYING;
   }
 
   Serial.print("SLRT ping: no response (consecutive failures: ");
@@ -687,7 +700,8 @@ void sendMainPage(EthernetClient &client, const char *message) {
   } else if (slrtPingStatus == PING_NOT_RESPONDING) {
     client.print("not-responding");
   } else if (slrtPingStatus == PING_CHECKING ||
-             slrtPingStatus == PING_BOOTING) {
+             slrtPingStatus == PING_BOOTING ||
+             slrtPingStatus == PING_RETRYING) {
     client.print("checking");
   }
   client.print("\">");
@@ -795,7 +809,8 @@ void sendMainPage(EthernetClient &client, const char *message) {
                  "'PING_RESPONDING'?'responding':v.slrt_ping_status==="
                  "'PING_NOT_RESPONDING'?'not-responding':"
                  "(v.slrt_ping_status==='PING_CHECKING'||"
-                 "v.slrt_ping_status==='PING_BOOTING')?'checking':'';"
+                 "v.slrt_ping_status==='PING_BOOTING'||"
+                 "v.slrt_ping_status==='PING_RETRYING')?'checking':'';"
                  "targetIp.textContent=v.slrt_target_ip;"
                  "failedPings.textContent=v.failed_ping_count;"
                  "var age=Number(v.last_ping_check_ms_ago);"
