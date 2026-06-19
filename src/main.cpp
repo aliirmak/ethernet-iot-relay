@@ -19,7 +19,7 @@ const uint8_t DEFAULT_RESTART_DELAY_SECONDS = 3;
 const uint8_t MIN_RESTART_DELAY_SECONDS = 1;
 const uint8_t MAX_RESTART_DELAY_SECONDS = 15;
 const uint16_t SETTINGS_MAGIC = 0x5532;
-const uint8_t SETTINGS_VERSION = 2;
+const uint8_t SETTINGS_VERSION = 3;
 const bool PING_MONITOR_ENABLED = true;
 const unsigned long BOOT_GRACE_MS = 90000UL;
 const unsigned long PING_TIMEOUT_MS = 1500UL;
@@ -44,6 +44,7 @@ enum PingStatus {
   PING_UNKNOWN,
   PING_BOOTING,
   PING_CHECKING,
+  PING_RETRYING,
   PING_RESPONDING,
   PING_NOT_RESPONDING,
   PING_DISABLED
@@ -57,16 +58,26 @@ unsigned long lastSuccessfulPingMs = 0;
 unsigned long bootGraceStartMs = 0;
 uint8_t restartDelaySeconds = DEFAULT_RESTART_DELAY_SECONDS;
 uint16_t pingIntervalSeconds = DEFAULT_PING_INTERVAL_SECONDS;
-uint8_t consecutiveFailedPings = 0;
+uint32_t consecutiveFailedPings = 0;
 bool pingCheckRequested = false;
 bool bootGraceActive = false;
 bool hasPingAttempt = false;
 bool continuousPingEnabled = DEFAULT_CONTINUOUS_PING_ENABLED;
+bool networkReconfigureRequested = false;
 
-struct __attribute__((packed)) LegacyPersistentSettings {
+struct __attribute__((packed)) Version1PersistentSettings {
   uint16_t magic;
   uint8_t version;
   uint8_t restartDelaySeconds;
+  uint8_t checksum;
+};
+
+struct __attribute__((packed)) Version2PersistentSettings {
+  uint16_t magic;
+  uint8_t version;
+  uint8_t restartDelaySeconds;
+  uint8_t continuousPingEnabled;
+  uint16_t pingIntervalSeconds;
   uint8_t checksum;
 };
 
@@ -76,21 +87,36 @@ struct __attribute__((packed)) PersistentSettings {
   uint8_t restartDelaySeconds;
   uint8_t continuousPingEnabled;
   uint16_t pingIntervalSeconds;
+  uint8_t controllerIp[4];
+  uint8_t targetIp[4];
   uint8_t checksum;
 };
 
-uint8_t legacySettingsChecksum(const LegacyPersistentSettings &settings) {
+uint8_t version1SettingsChecksum(const Version1PersistentSettings &settings) {
   return static_cast<uint8_t>(settings.magic ^ (settings.magic >> 8) ^
                               settings.version ^ settings.restartDelaySeconds ^
                               0xA5);
 }
 
-uint8_t settingsChecksum(const PersistentSettings &settings) {
+uint8_t version2SettingsChecksum(const Version2PersistentSettings &settings) {
   return static_cast<uint8_t>(
       settings.magic ^ (settings.magic >> 8) ^ settings.version ^
       settings.restartDelaySeconds ^ settings.continuousPingEnabled ^
       settings.pingIntervalSeconds ^ (settings.pingIntervalSeconds >> 8) ^
       0xA5);
+}
+
+uint8_t settingsChecksum(const PersistentSettings &settings) {
+  uint8_t checksum = static_cast<uint8_t>(
+      settings.magic ^ (settings.magic >> 8) ^ settings.version ^
+      settings.restartDelaySeconds ^ settings.continuousPingEnabled ^
+      settings.pingIntervalSeconds ^ (settings.pingIntervalSeconds >> 8) ^
+      0xA5);
+  for (uint8_t index = 0; index < 4; ++index) {
+    checksum ^= settings.controllerIp[index];
+    checksum ^= settings.targetIp[index];
+  }
+  return checksum;
 }
 
 bool isValidRestartDelay(uint8_t seconds) {
@@ -103,11 +129,48 @@ bool isValidPingInterval(uint16_t seconds) {
          seconds <= MAX_PING_INTERVAL_SECONDS;
 }
 
+bool isUsableAddress(IPAddress address) {
+  return address[0] > 0 && address[0] < 224 && address != IPAddress(255, 255, 255, 255);
+}
+
+bool isValidControllerAddress(IPAddress address) {
+  for (uint8_t index = 0; index < 4; ++index) {
+    if ((address[index] & subnet[index]) !=
+        (gateway[index] & subnet[index])) {
+      return false;
+    }
+  }
+
+  uint8_t hostBits[4];
+  for (uint8_t index = 0; index < 4; ++index) {
+    hostBits[index] = address[index] & static_cast<uint8_t>(~subnet[index]);
+  }
+
+  bool networkAddress = true;
+  bool broadcastAddress = true;
+  for (uint8_t index = 0; index < 4; ++index) {
+    networkAddress &= hostBits[index] == 0;
+    broadcastAddress &=
+        hostBits[index] == static_cast<uint8_t>(~subnet[index]);
+  }
+
+  return isUsableAddress(address) && !networkAddress && !broadcastAddress &&
+         address != gateway && address != slrtTargetIP;
+}
+
 bool saveSettings(uint8_t restartSeconds, bool continuousEnabled,
-                  uint16_t intervalSeconds) {
-  PersistentSettings settings = {
-      SETTINGS_MAGIC, SETTINGS_VERSION, restartSeconds,
-      continuousEnabled ? 1U : 0U, intervalSeconds, 0};
+                  uint16_t intervalSeconds, IPAddress controllerAddress,
+                  IPAddress targetAddress) {
+  PersistentSettings settings = {};
+  settings.magic = SETTINGS_MAGIC;
+  settings.version = SETTINGS_VERSION;
+  settings.restartDelaySeconds = restartSeconds;
+  settings.continuousPingEnabled = continuousEnabled ? 1U : 0U;
+  settings.pingIntervalSeconds = intervalSeconds;
+  for (uint8_t index = 0; index < 4; ++index) {
+    settings.controllerIp[index] = controllerAddress[index];
+    settings.targetIp[index] = targetAddress[index];
+  }
   settings.checksum = settingsChecksum(settings);
   EEPROM.put(0, settings);
 
@@ -119,11 +182,15 @@ bool saveSettings(uint8_t restartSeconds, bool continuousEnabled,
       savedSettings.checksum == settingsChecksum(savedSettings) &&
       savedSettings.restartDelaySeconds == restartSeconds &&
       savedSettings.continuousPingEnabled == settings.continuousPingEnabled &&
-      savedSettings.pingIntervalSeconds == intervalSeconds;
+      savedSettings.pingIntervalSeconds == intervalSeconds &&
+      memcmp(savedSettings.controllerIp, settings.controllerIp, 4) == 0 &&
+      memcmp(savedSettings.targetIp, settings.targetIp, 4) == 0;
   if (saved) {
     restartDelaySeconds = restartSeconds;
     continuousPingEnabled = continuousEnabled;
     pingIntervalSeconds = intervalSeconds;
+    ip = controllerAddress;
+    slrtTargetIP = targetAddress;
   }
   return saved;
 }
@@ -137,32 +204,59 @@ void loadSettings() {
       settings.checksum == settingsChecksum(settings) &&
       isValidRestartDelay(settings.restartDelaySeconds) &&
       settings.continuousPingEnabled <= 1 &&
-      isValidPingInterval(settings.pingIntervalSeconds)) {
+      isValidPingInterval(settings.pingIntervalSeconds) &&
+      isUsableAddress(IPAddress(settings.controllerIp)) &&
+      isUsableAddress(IPAddress(settings.targetIp))) {
     restartDelaySeconds = settings.restartDelaySeconds;
     continuousPingEnabled = settings.continuousPingEnabled != 0;
     pingIntervalSeconds = settings.pingIntervalSeconds;
+    ip = IPAddress(settings.controllerIp);
+    slrtTargetIP = IPAddress(settings.targetIp);
     return;
   }
 
-  LegacyPersistentSettings legacySettings;
-  EEPROM.get(0, legacySettings);
-  if (legacySettings.magic == SETTINGS_MAGIC &&
-      legacySettings.version == 1 &&
-      legacySettings.checksum == legacySettingsChecksum(legacySettings) &&
-      isValidRestartDelay(legacySettings.restartDelaySeconds)) {
-    restartDelaySeconds = legacySettings.restartDelaySeconds;
+  Version2PersistentSettings version2Settings;
+  EEPROM.get(0, version2Settings);
+  if (version2Settings.magic == SETTINGS_MAGIC &&
+      version2Settings.version == 2 &&
+      version2Settings.checksum ==
+          version2SettingsChecksum(version2Settings) &&
+      isValidRestartDelay(version2Settings.restartDelaySeconds) &&
+      version2Settings.continuousPingEnabled <= 1 &&
+      isValidPingInterval(version2Settings.pingIntervalSeconds)) {
+    restartDelaySeconds = version2Settings.restartDelaySeconds;
+    continuousPingEnabled = version2Settings.continuousPingEnabled != 0;
+    pingIntervalSeconds = version2Settings.pingIntervalSeconds;
+  } else {
+    Version1PersistentSettings version1Settings;
+    EEPROM.get(0, version1Settings);
+    if (version1Settings.magic == SETTINGS_MAGIC &&
+        version1Settings.version == 1 &&
+        version1Settings.checksum ==
+            version1SettingsChecksum(version1Settings) &&
+        isValidRestartDelay(version1Settings.restartDelaySeconds)) {
+      restartDelaySeconds = version1Settings.restartDelaySeconds;
+    }
   }
 
-  saveSettings(restartDelaySeconds, DEFAULT_CONTINUOUS_PING_ENABLED,
-               DEFAULT_PING_INTERVAL_SECONDS);
+  saveSettings(restartDelaySeconds, continuousPingEnabled, pingIntervalSeconds,
+               ip, slrtTargetIP);
 }
 
 bool saveRestartDelay(uint8_t seconds) {
-  return saveSettings(seconds, continuousPingEnabled, pingIntervalSeconds);
+  return saveSettings(seconds, continuousPingEnabled, pingIntervalSeconds, ip,
+                      slrtTargetIP);
 }
 
 bool savePingSettings(bool continuousEnabled, uint16_t intervalSeconds) {
-  return saveSettings(restartDelaySeconds, continuousEnabled, intervalSeconds);
+  return saveSettings(restartDelaySeconds, continuousEnabled, intervalSeconds,
+                      ip, slrtTargetIP);
+}
+
+bool saveNetworkSettings(IPAddress controllerAddress,
+                         IPAddress targetAddress) {
+  return saveSettings(restartDelaySeconds, continuousPingEnabled,
+                      pingIntervalSeconds, controllerAddress, targetAddress);
 }
 
 unsigned long restartDelayMilliseconds() {
@@ -190,6 +284,8 @@ const char *pingStatusToString(PingStatus status) {
     return "PING_BOOTING";
   case PING_CHECKING:
     return "PING_CHECKING";
+  case PING_RETRYING:
+    return "PING_RETRYING";
   case PING_RESPONDING:
     return "PING_RESPONDING";
   case PING_NOT_RESPONDING:
@@ -317,7 +413,7 @@ void printEthernetDiagnostics() {
   }
 }
 
-bool pingSLRTTarget() {
+IcmpPingResult pingSLRTTarget() {
   return icmpPing(slrtTargetIP, PING_TIMEOUT_MS);
 }
 
@@ -368,13 +464,23 @@ void updatePingMonitor() {
   PingStatus previousStatus = slrtPingStatus;
   slrtPingStatus = PING_CHECKING;
 
-  bool responding = pingSLRTTarget();
-  if (responding) {
+  IcmpPingResult pingResult = pingSLRTTarget();
+  if (pingResult == ICMP_PING_REPLY) {
     lastSuccessfulPingMs = millis();
     consecutiveFailedPings = 0;
     bootGraceActive = false;
     slrtPingStatus = PING_RESPONDING;
     Serial.println("SLRT ping: responding.");
+    return;
+  }
+
+  if (pingResult == ICMP_PING_NO_SOCKET ||
+      pingResult == ICMP_PING_SOCKET_ERROR) {
+    slrtPingStatus = previousStatus == PING_CHECKING ? PING_RETRYING
+                                                     : previousStatus;
+    Serial.println(pingResult == ICMP_PING_NO_SOCKET
+                       ? "SLRT ping deferred: no W5100 socket available."
+                       : "SLRT ping failed: W5100 socket error.");
     return;
   }
 
@@ -385,7 +491,7 @@ void updatePingMonitor() {
     return;
   }
 
-  if (consecutiveFailedPings < 255) {
+  if (consecutiveFailedPings < 0xFFFFFFFFUL) {
     ++consecutiveFailedPings;
   }
 
@@ -395,7 +501,7 @@ void updatePingMonitor() {
   } else if (previousStatus == PING_RESPONDING) {
     slrtPingStatus = PING_RESPONDING;
   } else {
-    slrtPingStatus = PING_UNKNOWN;
+    slrtPingStatus = PING_RETRYING;
   }
 
   Serial.print("SLRT ping: no response (consecutive failures: ");
@@ -517,6 +623,16 @@ void sendRedirectToDashboard(EthernetClient &client) {
   client.println();
 }
 
+void sendRedirectToAddress(EthernetClient &client, IPAddress address) {
+  client.println("HTTP/1.1 303 See Other");
+  client.print("Location: http://");
+  printAddress(client, address, false);
+  client.println("/");
+  client.println("Cache-Control: no-store");
+  client.println("Connection: close");
+  client.println();
+}
+
 void sendStatus(EthernetClient &client) {
   sendCommonHeaders(client, "text/plain; charset=utf-8");
   client.print("commanded_power_state=");
@@ -527,6 +643,8 @@ void sendStatus(EthernetClient &client) {
   client.println(pingStatusToString(slrtPingStatus));
   client.print("slrt_target_ip=");
   printAddress(client, slrtTargetIP);
+  client.print("controller_ip=");
+  printAddress(client, ip);
   client.print("last_ping_check_ms_ago=");
   if (hasPingAttempt) {
     client.println(millis() - lastPingAttemptMs);
@@ -564,6 +682,7 @@ void sendMainPage(EthernetClient &client, const char *message) {
       "input[type=range]{width:100%}.responding{color:#08752d}"
       ".not-responding{color:#b00020}.checking{color:#8a5a00}"
       "input[type=number]{font-size:1rem;width:5rem;padding:.35rem}"
+      ".ip-input{font-size:1rem;width:10rem;padding:.35rem}"
       "input:disabled{color:#777;background:#ddd}</style>");
   client.println("</head><body><h1>Uno32 Ethernet Power Cycler</h1>");
   if (message != NULL) {
@@ -581,7 +700,8 @@ void sendMainPage(EthernetClient &client, const char *message) {
   } else if (slrtPingStatus == PING_NOT_RESPONDING) {
     client.print("not-responding");
   } else if (slrtPingStatus == PING_CHECKING ||
-             slrtPingStatus == PING_BOOTING) {
+             slrtPingStatus == PING_BOOTING ||
+             slrtPingStatus == PING_RETRYING) {
     client.print("checking");
   }
   client.print("\">");
@@ -653,6 +773,25 @@ void sendMainPage(EthernetClient &client, const char *message) {
   }
   client.println("> seconds</p><button type=\"submit\">Save ping "
                  "settings</button></form>");
+  client.println(
+      "<form class=\"settings\" action=\"/targetip\" method=\"get\">");
+  client.print("<label for=\"targetAddress\"><strong>SLRT target IP</strong>"
+               "</label><p><input class=\"ip-input\" id=\"targetAddress\" "
+               "name=\"address\" type=\"text\" inputmode=\"decimal\" "
+               "pattern=\"[0-9]{1,3}(\\.[0-9]{1,3}){3}\" value=\"");
+  printAddress(client, slrtTargetIP, false);
+  client.println("\" required> <button type=\"submit\">Save target "
+                 "IP</button></p></form>");
+  client.println(
+      "<form class=\"settings\" action=\"/controllerip\" method=\"get\">");
+  client.print("<label for=\"controllerAddress\"><strong>Controller IP"
+               "</strong></label><p><input class=\"ip-input\" "
+               "id=\"controllerAddress\" name=\"address\" type=\"text\" "
+               "inputmode=\"decimal\" "
+               "pattern=\"[0-9]{1,3}(\\.[0-9]{1,3}){3}\" value=\"");
+  printAddress(client, ip, false);
+  client.println("\" required> <button type=\"submit\">Save controller "
+                 "IP</button></p></form>");
   client.println("<p><a href=\"/status\">Plain-text status</a></p>");
   client.println("<p><small>Status is commanded state only; AC power is not "
                  "physically verified. Ping reports network reachability "
@@ -670,7 +809,8 @@ void sendMainPage(EthernetClient &client, const char *message) {
                  "'PING_RESPONDING'?'responding':v.slrt_ping_status==="
                  "'PING_NOT_RESPONDING'?'not-responding':"
                  "(v.slrt_ping_status==='PING_CHECKING'||"
-                 "v.slrt_ping_status==='PING_BOOTING')?'checking':'';"
+                 "v.slrt_ping_status==='PING_BOOTING'||"
+                 "v.slrt_ping_status==='PING_RETRYING')?'checking':'';"
                  "targetIp.textContent=v.slrt_target_ip;"
                  "failedPings.textContent=v.failed_ping_count;"
                  "var age=Number(v.last_ping_check_ms_ago);"
@@ -741,6 +881,53 @@ bool parsePingInterval(const char *query, uint16_t &seconds) {
   return true;
 }
 
+bool parseIpAddress(const char *query, IPAddress &address) {
+  if (query == NULL) {
+    return false;
+  }
+
+  const char *valueStart = strstr(query, "address=");
+  if (valueStart == NULL) {
+    return false;
+  }
+  valueStart += strlen("address=");
+
+  uint8_t octets[4];
+  for (uint8_t index = 0; index < 4; ++index) {
+    if (!isdigit(static_cast<unsigned char>(*valueStart))) {
+      return false;
+    }
+
+    char *end = NULL;
+    unsigned long value = strtoul(valueStart, &end, 10);
+    if (value > 255 || end == valueStart) {
+      return false;
+    }
+    octets[index] = static_cast<uint8_t>(value);
+
+    if (index < 3) {
+      if (*end != '.') {
+        return false;
+      }
+      valueStart = end + 1;
+    } else if (*end != '\0' && *end != '&') {
+      return false;
+    }
+  }
+
+  address = IPAddress(octets);
+  return isUsableAddress(address);
+}
+
+void resetPingResultForTargetChange() {
+  hasPingAttempt = false;
+  lastPingAttemptMs = 0;
+  lastSuccessfulPingMs = 0;
+  consecutiveFailedPings = 0;
+  slrtPingStatus = PING_UNKNOWN;
+  pingCheckRequested = continuousPingEnabled && powerState == POWER_ON;
+}
+
 void routeRequest(EthernetClient &client, const char *path, const char *query) {
   if (strcmp(path, "/") == 0) {
     sendMainPage(client, NULL);
@@ -796,6 +983,31 @@ void routeRequest(EthernetClient &client, const char *path, const char *query) {
       Serial.println("Invalid ping interval received from web.");
     }
     sendRedirectToDashboard(client);
+  } else if (strcmp(path, "/targetip") == 0) {
+    IPAddress targetAddress;
+    if (parseIpAddress(query, targetAddress) && targetAddress != ip &&
+        targetAddress != gateway &&
+        saveNetworkSettings(ip, targetAddress)) {
+      resetPingResultForTargetChange();
+      Serial.print("SLRT target IP saved: ");
+      printAddress(Serial, slrtTargetIP);
+    } else {
+      Serial.println("Invalid or conflicting SLRT target IP.");
+    }
+    sendRedirectToDashboard(client);
+  } else if (strcmp(path, "/controllerip") == 0) {
+    IPAddress controllerAddress;
+    if (parseIpAddress(query, controllerAddress) &&
+        isValidControllerAddress(controllerAddress) &&
+        saveNetworkSettings(controllerAddress, slrtTargetIP)) {
+      networkReconfigureRequested = true;
+      Serial.print("Controller IP saved: ");
+      printAddress(Serial, ip);
+      sendRedirectToAddress(client, ip);
+    } else {
+      Serial.println("Invalid or conflicting controller IP.");
+      sendRedirectToDashboard(client);
+    }
   } else {
     sendNotFound(client);
   }
@@ -851,6 +1063,19 @@ void handleWebClient() {
   client.stop();
 }
 
+void updateNetworkConfiguration() {
+  if (!networkReconfigureRequested) {
+    return;
+  }
+
+  networkReconfigureRequested = false;
+  delay(100);
+  Ethernet.begin(mac, ip, dnsServer, gateway, subnet);
+  server.begin();
+  Serial.print("Ethernet restarted at: ");
+  printIpAddress(Serial);
+}
+
 void setup() {
   // Drive the Normally ON outlet to its safe state before starting peripherals.
   digitalWrite(RELAY_PIN, RELAY_SIGNAL_FOR_POWER_ON ? HIGH : LOW);
@@ -883,5 +1108,6 @@ void loop() {
   updateRestartState();
   handleSerial();
   handleWebClient();
+  updateNetworkConfiguration();
   updatePingMonitor();
 }
