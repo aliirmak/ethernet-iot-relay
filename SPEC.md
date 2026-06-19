@@ -26,6 +26,9 @@ interface.
   `PING_NOT_RESPONDING`.
 - Provide web route `/pingnow` and include ping fields in `/status`.
 - Provide serial commands `pingstatus` and `pingnow`.
+- Persist editable SLRT target and controller IPv4 addresses in EEPROM.
+- Apply target-address changes immediately and safely restart Ethernet after
+  controller-address changes.
 - Use static IP `192.168.1.105` by default.
 
 ## Pin Allocation

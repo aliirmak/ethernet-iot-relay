@@ -78,6 +78,8 @@ Open `http://192.168.1.105/` from the same local network. Available endpoints:
 - `/restart` - turn power off for the saved delay, then restore it
 - `/pingnow` - request an ICMP ping check as soon as the HTTP request finishes
 - `/delay?seconds=3` - save a restart delay from 1 to 15 seconds
+- `/targetip?address=192.168.1.101` - save the SLRT target address
+- `/controllerip?address=192.168.1.105` - save and apply the controller address
 - `/status` - machine-readable plain-text status
 
 Control and settings routes redirect back to `/` after performing their
@@ -101,6 +103,13 @@ disabled by default and can be enabled from the dashboard. Their interval is
 configurable from 1 to 300 seconds and is stored with the checkbox state in
 EEPROM. Manual **Check Ping Now** requests work whether continuous checks are
 enabled or disabled. Each check uses a 1.5-second timeout.
+
+The dashboard also provides editable controller and SLRT target IPv4
+addresses. Both are stored in EEPROM. A new target address takes effect
+immediately. Saving a controller address redirects the browser to the new
+address and restarts the Ethernet interface. Controller addresses must remain
+on the configured `192.168.1.0/24` network and cannot use the network,
+broadcast, gateway, or target address.
 
 The restart timer is non-blocking; status and serial commands remain
 responsive. A second restart request during a restart is rejected.
